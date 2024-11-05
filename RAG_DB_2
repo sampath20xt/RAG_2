@@ -2,6 +2,7 @@ import streamlit as st
 from dotenv import load_dotenv, find_dotenv
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.utilities import SQLDatabase
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 import psycopg2
@@ -58,7 +59,7 @@ def get_schema(conn):
     return schema_info
 
 # Function to generate SQL query using Groq API
-def generate_query(user_query, schema, chat_history):
+def generate_query(user_query, schema_info, chat_history):
     prompt = f"""
     You are a data analyst. Based on the provided database schema and conversation history, generate a SQL query.
     You are a data analyst at a company. You are interacting with a user who is asking you questions about the company's database.
@@ -73,7 +74,7 @@ def generate_query(user_query, schema, chat_history):
     Do not include any additional text, only the SQL query.
 
     Schema:
-    {schema}
+    {schema_info}
 
     Conversation History: {chat_history}
 
@@ -134,7 +135,7 @@ def get_response(user_query, conn, schema, chat_history):
     And the output should always be formatted as a chat response.
 
     Schema:
-    {schema}
+    {schema_info}
 
     Question: {user_query}
     SQL Query: {generated_query}
