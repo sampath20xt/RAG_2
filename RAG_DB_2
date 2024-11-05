@@ -128,8 +128,10 @@ def get_response(user_query, conn, schema, chat_history):
 
     # Step 3: Format the result in a natural language response
     response_template = """
-    You are a data analyst at a company. Based on the table schema, question, sql query, and sql response, provide a natural language response.
-    The response should be clear and concise.
+    You are a data analyst at a company. You are interacting with a user who is asking you questions about the company's database.
+    Based on the table schema below, question, sql query, and sql response, write a natural language response.
+    The output should only be the response of the query without any other information.
+    And the output should always be formatted as a chat response.
 
     Schema:
     {schema}
