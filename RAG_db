@@ -1,0 +1,148 @@
+import streamlit as st
+from dotenv import load_dotenv, find_dotenv
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+import psycopg2
+import os
+from groq import Groq  # Import Groq library for using Groq API
+# Load environment variables
+_ = load_dotenv(find_dotenv())
+groq_api_key = os.getenv("GROQ_API_KEY")
+# Database credentials from environment
+db_user = os.getenv('DB_USER')
+db_password = os.getenv('DB_PASSWORD')
+db_host = os.getenv('DB_HOST', 'localhost')
+db_port = os.getenv('DB_PORT', '5432')
+database = os.getenv('DATABASE')
+# Check if required environment variables are loaded
+if not all([groq_api_key, db_user, db_password, database]):
+    st.error("One or more required environment variables (GROQ_API_KEY, DB_USER, DB_PASSWORD, DATABASE) are missing.")
+# Initialize Groq client
+client = Groq(api_key=groq_api_key)
+# Function to initialize PostgreSQL connection
+def init_database():
+    try:
+        conn = psycopg2.connect(
+            dbname=database,
+            user=db_user,
+            password=db_password,
+            host=db_host,
+            port=db_port
+        )
+        return conn
+    except Exception as e:
+        st.error(f"Error connecting to the database: {e}")
+        return None
+# Function to fetch database schema information
+def get_schema(conn):
+    schema_info = ""
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT table_name, column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                ORDER BY table_name, ordinal_position;
+            """)
+            tables = {}
+            for table, column, data_type in cursor.fetchall():
+                if table not in tables:
+                    tables[table] = []
+                tables[table].append(f"{column} ({data_type})")
+            for table, columns in tables.items():
+                schema_info += f"Table: {table}, Columns: {', '.join(columns)}\n"
+    except Exception as e:
+        st.error(f"Error fetching schema: {e}")
+    return schema_info
+# Function to generate SQL-like query using Groq API
+def generate_query(user_query, schema, chat_history):
+    prompt = f"""
+    You are a data analyst. Based on the provided database schema and conversation history, generate a SQL query.
+    Do not include any additional text, only the SQL query.
+    Schema:
+    {schema}
+    Conversation History: {chat_history}
+    Question: {user_query}
+    SQL Query:
+    """
+    try:
+        completion = client.chat.completions.create(
+            model="llama3-8b-8192",  # Use the specific model you have access to
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5,
+            max_tokens=1024,
+            top_p=1,
+            stream=False,
+            stop=None,
+        )
+        generated_query = completion.choices[0].message.content.strip()
+        return generated_query
+    except Exception as e:
+        st.error(f"Error generating query with Groq API: {e}")
+        return None
+# Function to execute the SQL query on PostgreSQL and fetch results
+def execute_query(conn, query):
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(query)
+            columns = [desc[0] for desc in cursor.description]
+            results = cursor.fetchall()
+            return [dict(zip(columns, row)) for row in results]
+    except Exception as e:
+        st.error(f"Error executing query: {e}")
+        return None
+# Main function for the Streamlit app
+def main():
+    st.set_page_config(page_title="Chat with Your Data Files", page_icon=":page_with_curl:")
+    st.title("Chat with Your Database")
+    # Initialize database connection
+    conn = init_database()
+    if not conn:
+        st.stop()
+    # Fetch and display schema
+    schema = get_schema(conn)
+    if not schema:
+        st.error("Unable to fetch schema information.")
+        st.stop()
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = [
+            AIMessage(content="Hello! I'm here to help with your database queries."),
+        ]
+    # Display chat history
+    for message in st.session_state.chat_history:
+        if isinstance(message, AIMessage):
+            with st.chat_message("AI"):
+                st.markdown(message.content)
+        elif isinstance(message, HumanMessage):
+            with st.chat_message("Human"):
+                st.markdown(message.content)
+    # User input
+    user_query = st.chat_input("Type a message...")
+    if user_query and user_query.strip():
+        st.session_state.chat_history.append(HumanMessage(content=user_query))
+        # Generate SQL query using Groq API
+        generated_query = generate_query(user_query, schema, st.session_state.chat_history)
+        if not generated_query:
+            st.error("Failed to generate a query.")
+            st.stop()
+        # Display generated query
+        st.write(f"**Generated Query:** {generated_query}")
+        # Execute the generated query
+        result = execute_query(conn, generated_query)
+        if result is None:
+            st.error("Failed to execute the query.")
+            st.stop()
+        # Display the results in the chat
+        with st.chat_message("AI"):
+            if result:
+                st.markdown(f"**Answer:** {result}")
+            else:
+                st.markdown("**Answer:** No results found.")
+        # Append AI response to chat history
+        st.session_state.chat_history.append(AIMessage(content=f"Query: {generated_query}\nAnswer: {result if result else 'No results found'}"))
+    # Close the database connection at the end of the session
+    conn.close()
+if __name__ == "__main__":
+    main()
