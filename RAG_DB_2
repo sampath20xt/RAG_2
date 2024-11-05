@@ -61,6 +61,15 @@ def get_schema(conn):
 def generate_query(user_query, schema, chat_history):
     prompt = f"""
     You are a data analyst. Based on the provided database schema and conversation history, generate a SQL query.
+    You are a data analyst at a company. You are interacting with a user who is asking you questions about the company's database.
+    You should write complex queries and get the information from multiple tables.
+    You are trained to create complex queries to retrieve data from PostgresDB.
+    If user is asking account related queries you need to retrieve information from all the tables in the DB where the value is available.
+    If the user is asking for pending amount then it should be SUM of all the balance amounts in the table.
+    Generate the query without any special characters or wrappers to it.
+    Create queries using JOIN function and do not use UNION.
+    Based on the table schema below, write a SQL query that would answer the user's question.
+    Take the conversation history into account.
     Do not include any additional text, only the SQL query.
 
     Schema:
