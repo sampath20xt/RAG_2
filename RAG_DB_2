@@ -1,0 +1,206 @@
+import streamlit as st
+from dotenv import load_dotenv, find_dotenv
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+import psycopg2
+import os
+from groq import Groq  # Import Groq library for using Groq API
+
+# Load environment variables
+_ = load_dotenv(find_dotenv())
+groq_api_key = os.getenv("GROQ_API_KEY")
+db_user = os.getenv('DB_USER')
+db_password = os.getenv('DB_PASSWORD')
+db_host = os.getenv('DB_HOST', 'localhost')
+db_port = os.getenv('DB_PORT', '5432')
+database = os.getenv('DATABASE')
+
+# Initialize Groq client
+client = Groq(api_key=groq_api_key)
+
+# Function to initialize PostgreSQL connection
+def init_database():
+    try:
+        conn = psycopg2.connect(
+            dbname=database,
+            user=db_user,
+            password=db_password,
+            host=db_host,
+            port=db_port
+        )
+        return conn
+    except Exception as e:
+        st.error(f"Error connecting to the database: {e}")
+        return None
+
+# Function to fetch database schema information
+def get_schema(conn):
+    schema_info = ""
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT table_name, column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                ORDER BY table_name, ordinal_position;
+            """)
+            tables = {}
+            for table, column, data_type in cursor.fetchall():
+                if table not in tables:
+                    tables[table] = []
+                tables[table].append(f"{column} ({data_type})")
+            for table, columns in tables.items():
+                schema_info += f"Table: {table}, Columns: {', '.join(columns)}\n"
+    except Exception as e:
+        st.error(f"Error fetching schema: {e}")
+    return schema_info
+
+# Function to generate SQL query using Groq API
+def generate_query(user_query, schema, chat_history):
+    prompt = f"""
+    You are a data analyst. Based on the provided database schema and conversation history, generate a SQL query.
+    Do not include any additional text, only the SQL query.
+
+    Schema:
+    {schema}
+
+    Conversation History: {chat_history}
+
+    Question: {user_query}
+    SQL Query:
+    """
+    
+    try:
+        completion = client.chat.completions.create(
+            model="llama3-8b-8192",  # Replace with the specific model you have access to
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5,
+            max_tokens=1024,
+            top_p=1,
+            stream=False,
+            stop=None,
+        )
+        generated_query = completion.choices[0].message.content.strip()
+        return generated_query
+    except Exception as e:
+        st.error(f"Error generating query with Groq API: {e}")
+        return None
+
+# Function to execute the SQL query on PostgreSQL and fetch results
+def execute_query(conn, query):
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(query)
+            columns = [desc[0] for desc in cursor.description]
+            results = cursor.fetchall()
+            return [dict(zip(columns, row)) for row in results]
+    except Exception as e:
+        st.error(f"Error executing query: {e}")
+        return None
+
+# Function to get a natural language response based on the SQL query and results
+def get_response(user_query, conn, schema, chat_history):
+    # Step 1: Generate SQL query using Groq API
+    generated_query = generate_query(user_query, schema, chat_history)
+
+    if not generated_query:
+        return "Failed to generate a SQL query."
+
+    # Display generated query
+    st.write(f"**Generated Query:** {generated_query}")
+
+    # Step 2: Execute the generated query
+    result = execute_query(conn, generated_query)
+
+    if result is None:
+        return "Failed to execute the query."
+
+    # Step 3: Format the result in a natural language response
+    response_template = """
+    You are a data analyst at a company. Based on the table schema, question, sql query, and sql response, provide a natural language response.
+    The response should be clear and concise.
+
+    Schema:
+    {schema}
+
+    Question: {user_query}
+    SQL Query: {generated_query}
+    SQL Response: {result}
+    
+    Natural Language Response:
+    """
+
+    response_prompt = ChatPromptTemplate.from_template(response_template)
+    response_content = response_prompt.format(
+        schema=schema,
+        user_query=user_query,
+        generated_query=generated_query,
+        result=result
+    )
+
+    try:
+        completion = client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[{"role": "user", "content": response_content}],
+            temperature=0.4,
+            max_tokens=150
+        )
+        
+        # Extract and return the natural language response
+        return completion.choices[0].message.content.strip()
+    except Exception as e:
+        st.error(f"Error generating natural language response with Groq API: {e}")
+        return "Failed to generate a response."
+
+# Main function for the Streamlit app
+def main():
+    st.set_page_config(page_title="Chat with Your Database", page_icon=":page_with_curl:")
+    st.title("Chat with Your Database")
+
+    # Initialize database connection
+    conn = init_database()
+    if not conn:
+        st.stop()
+
+    # Fetch and display schema
+    schema = get_schema(conn)
+    if not schema:
+        st.error("Unable to fetch schema information.")
+        st.stop()
+
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = [
+            AIMessage(content="Hello! I'm here to help with your database queries."),
+        ]
+
+    # Display chat history
+    for message in st.session_state.chat_history:
+        if isinstance(message, AIMessage):
+            with st.chat_message("AI"):
+                st.markdown(message.content)
+        elif isinstance(message, HumanMessage):
+            with st.chat_message("Human"):
+                st.markdown(message.content)
+
+    # User input
+    user_query = st.chat_input("Type a message...")
+    if user_query and user_query.strip():
+        st.session_state.chat_history.append(HumanMessage(content=user_query))
+
+        # Get response
+        response = get_response(user_query, conn, schema, st.session_state.chat_history)
+
+        # Display the response
+        with st.chat_message("AI"):
+            st.markdown(response)
+
+        # Append AI response to chat history
+        st.session_state.chat_history.append(AIMessage(content=response))
+
+    # Close the database connection at the end of the session
+    conn.close()
+
+if __name__ == "__main__":
+    main()
