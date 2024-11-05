@@ -1,0 +1,170 @@
+import streamlit as st
+from dotenv import load_dotenv, find_dotenv
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_community.utilities import SQLDatabase
+from langchain_core.output_parsers import StrOutputParser
+from langchain_google_genai import GoogleGenerativeAI
+import google.generativeai as genai
+import os
+
+_ = load_dotenv(find_dotenv())  # read local env file for the secrets
+google_api_key = os.getenv("GOOGLE_API_KEY")
+genai.configure(api_key=google_api_key)
+db_user = os.getenv('DB_USER')
+db_password = os.getenv('DB_PASSWORD')
+database = os.getenv('DATABASE')
+driver_dashboard = os.getenv('DRIVER_DASHBOARD_ID')
+dispatch_dashboard = os.getenv('DISPATCH_DASHBOARD_ID')
+revenue_dashboard = os.getenv('REVENUE_DASHBOARD_ID')
+
+
+# Function to initialize database connection with default parameters
+def init_database() -> SQLDatabase:
+    db_uri = f"postgresql+psycopg2://{db_user}:{db_password}@34.170.38.149:5433/{database}"
+    return SQLDatabase.from_uri(db_uri)
+
+
+# Function to create RAG search chain
+def get_sql_chain(db):
+    # Define the SQL query template
+
+    template = """
+    You are a data analyst at a company. You are interacting with a user who is asking you questions about the company's database.
+    You should write complex queries and get the information from multiple tables.
+    You are trained to create complex queries to retrieve data from PostgresDB.
+    If user is asking account related queries you need to retrieve information from all the tables in the DB where the value is available.
+    If the user is asking for pending amount then it should be SUM of all the balance amounts in the table.
+    Generate the query without any special characters or wrappers to it.
+    Create queries using JOIN function and do not use UNION.
+    Based on the table schema below, write a SQL query that would answer the user's question.
+    Take the conversation history into account.
+
+    <SCHEMA>{schema}</SCHEMA>
+
+    Conversation History: {chat_history}
+    
+    
+
+    Write only the SQL query and nothing else. Do not wrap the SQL query in any other text, not even backticks.
+
+    For example:
+    Question: What is the total revenue of completed orders?
+    SQL Query: SELECT SUM(total_amount) / 1000000000 AS total_amount_in_billions
+                FROM revenue
+                JOIN dispatch ON dispatch."customer_order_id" = revenue."customer_order_id"
+                WHERE dispatch."status" = 'COMPLETED';
+    Question: which 3 artists have the most tracks?
+    SQL Query: SELECT ArtistId, COUNT(*) as track_count FROM Track GROUP BY ArtistId ORDER BY track_count DESC LIMIT 3;
+    Question: Name 10 artists
+    SQL Query: SELECT Name FROM Artist LIMIT 10;
+
+    Your turn:
+
+    Question: {question}
+    SQL Query:
+    """
+
+    # Create a ChatPromptTemplate
+    prompt = ChatPromptTemplate.from_template(template)
+
+    # Create a GoogleGenerativeAI instance
+    model = GoogleGenerativeAI(temperature=0.4, model="gemini-pro")  # Adjust temperature and model name as needed
+
+    # Define a function to get schema
+    def get_schema(_):
+        return db.get_table_info()
+
+    # Define the SQL chain
+    return (
+            RunnablePassthrough.assign(schema=get_schema)
+            | prompt
+            | model
+            | StrOutputParser()
+    )
+
+
+def get_response(user_query: str, db: SQLDatabase, chat_history: list):
+    sql_chain = get_sql_chain(db)
+
+    # Define the template
+    template = """
+    You are a data analyst at a company. You are interacting with a user who is asking you questions about the company's database.
+    Based on the table schema below, question, sql query, and sql response, write a natural language response.
+    The output should only be the response of the query without any other information.
+    And the output should always be formatted as a chat response.
+    <SCHEMA>{schema}</SCHEMA>
+    
+     
+    Conversation History: {chat_history}
+    SQL Query: <SQL>{query}</SQL>
+    User question: {question}
+    SQL Response: {response}"""
+
+    # Create a ChatPromptTemplate
+    prompt = ChatPromptTemplate.from_template(template)
+
+    # Create a GoogleGenerativeAI instance
+    model = GoogleGenerativeAI(temperature=0.4, model="gemini-pro")  # Adjust temperature and model name as needed
+
+    # Define the SQL chain
+    chain = (
+            RunnablePassthrough.assign(query=sql_chain).assign(
+                schema=lambda _: db.get_table_info(),
+                response=lambda vars: db.run(vars["query"]),
+            )
+            | prompt
+            | model
+            | StrOutputParser()
+    )
+
+    # Invoke the chain
+    return chain.invoke({
+        "question": user_query,
+        "chat_history": chat_history,
+    })
+
+
+# Main function for the Streamlit app
+def main():
+    # Load environment variables
+    load_dotenv(find_dotenv())
+
+    # Set page config
+    st.set_page_config(page_title="RAG SEARCH", page_icon=":page_with_curl:")
+
+    st.title("Chat with Your Database")
+
+    # Initialize database connection
+    db = init_database()
+
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = [
+            AIMessage(content="Hello! I'm Chatbot Assistant . Ask me anything about your database."),
+        ]
+
+    for message in st.session_state.chat_history:
+        if isinstance(message, AIMessage):
+            with st.chat_message("AI"):
+                st.markdown(message.content)
+        elif isinstance(message, HumanMessage):
+            with st.chat_message("Human"):
+                st.markdown(message.content)
+
+    user_query = st.chat_input("Type a message...")
+    if user_query is not None and user_query.strip() != "":
+        st.session_state.chat_history.append(HumanMessage(content=user_query))
+
+        with st.chat_message("Human"):
+            st.markdown(user_query)
+
+        with st.chat_message("AI"):
+            response = get_response(user_query, db, st.session_state.chat_history)
+            st.markdown(response)
+
+        st.session_state.chat_history.append(AIMessage(content=response))
+
+
+if __name__ == "__main__":
+    main()
