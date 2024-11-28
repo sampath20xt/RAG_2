@@ -1,0 +1,40 @@
+# Streamlit application
+st.title("RAG Chatbot")
+st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+
+# Display chat history
+st.markdown('<div class="chat-history">', unsafe_allow_html=True)
+for message in st.session_state.conversation:
+    if message["sender"] == "user":
+        st.markdown(f'<div class="chat-bubble-user">{message["message"]}</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div class="chat-bubble-bot">{message["message"]}</div>', unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
+
+# User input for the question
+with st.form("chat_form", clear_on_submit=True):
+    user_input = st.text_input("Type your question:", "")
+    submitted = st.form_submit_button("Send")
+    
+    if submitted and user_input:
+        # Append user message to chat history
+        st.session_state.conversation.append({"sender": "user", "message": user_input})
+
+        # Generate MongoDB query
+        try:
+            query = generate_query(user_input)
+            st.session_state.conversation.append({"sender": "bot", "message": f"Generated Query:\n{query}"})
+
+            # Execute query and get the result
+            result = execute_generated_query(query, database)
+            if "error" in result:
+                bot_response = f"Error: {result['error']}"
+            else:
+                bot_response = f"Result:\n{result}"
+            st.session_state.conversation.append({"sender": "bot", "message": bot_response})
+        except Exception as e:
+            error_message = f"An error occurred: {str(e)}"
+            st.session_state.conversation.append({"sender": "bot", "message": error_message})
+
+# Force re-rendering of the UI to display updates
+st.experimental_rerun()
