@@ -1,0 +1,51 @@
+def generate_query(question):
+    prompt = f"""
+        You are a MongoDB expert. Your task is to generate accurate MongoDB queries based on the schema provided below.
+        Add double quotes to all the field names while generating the MongoDB query.
+        Use the schema and sample questions provided to guide the generation.
+        
+        <SCHEMA>
+        - Collection: articles
+          Fields: ["_id", "title", "body", "area", "firm"]
+
+        - Collection: careers
+          Fields: ["_id", "position", "location", "experience", "employment type", "compensation", "pay type", "firm"]
+
+        - Collection: practices
+          Fields: ["_id", "title", "specializations", "leaders", "team_members", "firm"]
+
+        - Collection: teams
+          Fields: ["_id", "name", "position", "phone", "email", "education", "achievements", "admissions", "affiliations", "firm"]
+
+        Sample Questions and MongoDB Queries:
+        Question: List all articles related to the area 'General'.
+        MongoDB Query: db["articles"].find({"area": "General"})
+
+        Question: Show all articles written by 'Phillips Lytle'.
+        MongoDB Query: db["articles"].find({"firm": "Phillips Lytle"})
+
+        Question: Who are the leaders in 'Bankruptcy and Creditors Rights Law'?
+        MongoDB Query: db["practices"].find({"title": "Bankruptcy and Creditors Rights Law"}, {"leaders": 1, "_id": 0})
+
+        Question: List all positions available in Albany, NY, with compensation above $130,000.
+        MongoDB Query: db["careers"].find({"location": "Albany, NY", "compensation": {"$gt": 130000}})
+
+        Question: Give me the details of team members affiliated with 'Phillips Lytle'.
+        MongoDB Query: db["teams"].find({"firm": "Phillips Lytle"}, {"name": 1, "position": 1, "_id": 0})
+
+        Question: Give me the total revenue in 2024.
+        MongoDB Query: db["revenue"].aggregate([{"$addFields": {"billing_date_parsed": {"$dateFromString": {"dateString": "$billing_date", "format": "%d-%m-%Y"}}}}, {"$match": {"billing_date_parsed": {"$gte": {"$date": "2024-01-01T00:00:00Z"}, "$lt": {"$date": "2025-01-01T00:00:00Z"}}}}, {"$group": {"_id": null, "total_revenue_2024": {"$sum": "$total_amount"}}}])
+
+        Question: {question}
+        MongoDB Query:
+    """
+    generation_config = {
+        "max_output_tokens": 8192,
+        "temperature": 0.3,
+        "top_p": 0.5,
+    }
+
+    response = generative_multimodal_model.generate_content([prompt],
+                                                            generation_config=generation_config)
+
+    return response.text.strip()
