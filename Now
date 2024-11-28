@@ -1,33 +1,36 @@
-def execute_generated_query(generated_query, db):
-    try:
-        print("Generated Query:", generated_query)  # Debugging
-
-        # Parse the generated query
-        collection_name = generated_query.split('["')[1].split('"]')[0]
-        query_type = generated_query.split('.')[1].split('(')[0]
-        query_params = generated_query.split('(', 1)[1].rsplit(')', 1)[0]
-        collection = db[collection_name]
-
-        if query_type == "find":
-            # Split query and projection
-            query, projection = query_params.split(",", 1)
-            query = json.loads(query.strip())
-            projection = json.loads(projection.strip())
-            result = list(collection.find(query, projection))
-        elif query_type == "count_documents":
-            query = json.loads(query_params)
-            result = collection.count_documents(query)
-        elif query_type == "aggregate":
-            pipeline = json_util.loads(query_params)
-            result = list(collection.aggregate(pipeline))
-        elif query_type == "distinct":
-            query = json.loads(query_params)
-            result = list(collection.distinct(query))
-        else:
-            raise ValueError(f"Unsupported query type: {query_type}")
-
-        print("Query Result:", result)
-        return result
-    except Exception as e:
-        print("Error during query execution:", e)
-        return {"error": str(e)}
+Write only the MongoDB query and nothing else. Do not wrap the MongoDB query in any other text, not even backticks. 
+            Question: which 3 artists have the most tracks?
+            MongoDB Query: db["tracks"].aggregate([{{"$group": {{"_id": "$ArtistId", "count": {{"$sum": 1}}}}, {{"$sort": {{"count": -1}}}}, {{"$limit": 3}}])
+            Question: Give me the total count of completed orders?
+            MongoDB Query: db["dispatch"].aggregate([{ "$match": { "status": "COMPLETED" } },{"$group": {"_id": null,"completedDispatchCount": { "$sum": 1 }}}])
+            Question: Give me the total count of exception orders?
+            MongoDB Query: db["dispatch"].aggregate([{ "$match": { "status": "EXCEPTION" } },{"$group": {"_id": null,"exceptionDispatchCount": { "$sum": 1 }}}])
+            Question: Do we have any orders that are yet to be delivered?
+            MongoDB Query: db["dispatch"].aggregate([{"$match": { "status": {"$nin": ["COMPLETED", "REJECTED", "CANCELLED", "CLOSED", "EXCEPTIONS"]}} },{"$group": {"_id": null,"yetToBeDeliveredCount": { "$sum": 1 }}}])
+            Question: Give me top 3 drivers?
+            MongoDB Query: db["driver_performance"].aggregate([
+            {"$group": {"_id": "$driver_id", "driver_name": {"$first": "$name"}, "attempted_orders": {"$sum": "$order_attempted"}}},
+            {"$sort": {"attempted_orders": -1}},
+            {"$limit": 3}
+            ])
+            Question: What is the total revenue of completed orders?
+            MongoDB Query: db["dispatch"].aggregate([{"$match": {"status": "COMPLETED"}},
+            {"$lookup": {"from": "revenue","localField": "customer_order_id","foreignField": "customer_order_id","as": "revenue_info"}},
+            {"$unwind": "$revenue_info"},{"$group": {"_id": null,"total_amount_in_billions": {"$sum": "$revenue_info.total_amount"}}}])'
+            Question: How many drivers do I have?
+            MongoDB Query: db["driver_performance"].aggregate([{"$group" : {"_id":"$driver_id"}},{"$count":"uniqueDriverCount"}])
+            Question: Give me the total amount for past due 90 days?
+            MongoDB Query: db["aging"].aggregate([{{"$group": {{"_id": null, "total_pending_amount": {{"$sum": {{"$add": ["$0-30", "$31-45", "$46-60", "$61-90"]}}}}}}])
+            Question: Give me the complete order information related to 65d62cee822dd63f4ede200b?
+            MongoDB Query: db["dispatch"].find({{"customer_order_id": "65d62cee822dd63f4ede200b"}})
+            Question: Give me the total revenue in 2024?
+            MongoDB Query: db["revenue"].aggregate([
+            {"$addFields": {"billing_date_parsed": {"$dateFromString": {"dateString": "$billing_date", "format": "%d-%m-%Y"}}}},
+            {"$match": {"billing_date_parsed": {"$gte": {"$date": "2024-01-01T00:00:00Z"}, "$lt": {"$date": "2025-01-01T00:00:00Z"}}}},
+            {"$group": {"_id": null, "total_revenue_2024": {"$sum": "$total_amount"}}}])
+            Question :What is the average travel distance?
+            MongoDB Query :db["driver_performance"].aggregate([{"$group": {"_id": null, "average_travel_distance": {"$avg": "$travel_distance"}}}])  
+            Question: how many orders attempted by Rick Powell driver in the month of may?
+            MongoDB Query :db["dispatch"].aggregate([{"$match": {"month_name": "May", "account_name": "Rick Powell"}}, {"$group": {"_id": null, "total_orders": {"$sum": 1 }}}])
+            Question : Completed orders and incompleted orders percentage?     
+            MongoDB Query: db["driver_performance"].aggregate([{"$group": {"_id": null, "average_completion_rate": {"$avg": "$Completed_Percentage"}, "average_incompletion_rate": {"$avg": "$Incompleted_Percentage"}}}])
