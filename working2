@@ -1,0 +1,227 @@
+import json
+import os
+from pymongo import MongoClient
+from bson import json_util
+from sentence_transformers import SentenceTransformer
+import chromadb
+import vertexai
+import ast
+# from dotenv import load_dotenv, find_dotenv
+from vertexai.generative_models import HarmCategory, HarmBlockThreshold
+from vertexai.preview.generative_models import GenerativeModel
+
+# Load environment variables
+mongo_url = "mongodb+srv://admin:Sampath@cluster01.wcpmehz.mongodb.net/"
+mongo_client = MongoClient(mongo_url)
+database = mongo_client["RAG"]
+
+# Collections
+collections = ["articles", "careers", "practices", "teams"]
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "email-extraction-381718-3f73208ce3b71.json"
+
+# Initialize Vertex AI generative model
+vertexai.init(project="email-extraction-381718", location="us-central1")
+generative_multimodal_model = GenerativeModel("gemini-1.5-pro-001")
+
+# # MongoDB client and database setup
+# client = MongoClient(mongo_url)
+# db = client[database]
+
+# Initialize ChromaDB client and collection
+chroma_client = chromadb.Client()
+chroma_collection = chroma_client.create_collection(name="RAG_collection")
+
+
+# Function to retrieve MongoDB schema
+def get_schema(db):
+    schema_info = {}
+    collections = db.list_collection_names()
+    for collection_name in collections:
+        collection = db[collection_name]
+        sample_record = collection.find_one()
+        if sample_record:
+            schema_info[collection_name] = {key: type(value).__name__ for key, value in sample_record.items()}
+        else:
+            schema_info[collection_name] = "No records found"
+    return schema_info
+
+
+# Generate embeddings for ChromaDB
+def generate_embedding(query):
+    model = SentenceTransformer('multi-qa-distilbert-cos-v1')
+    return model.encode(query)
+
+
+def get_all_collection_schemas_and_store_prompts():
+    schema = get_schema(database)  # Retrieve schema information from MongoDB
+    print(schema)
+
+    for collection_name, fields in schema.items():
+        field_names = ' '.join(fields.keys())
+        schema_info = f"{collection_name}:{field_names}"
+
+        # Create a prompt for storing schema info in ChromaDB
+        prompt = f"<SCHEMA>{schema_info}</SCHEMA>"
+        chroma_collection.upsert(
+            ids=[collection_name],
+            metadatas=[{"collection_name": collection_name, "schema_info": schema_info, "prompt": prompt}],
+            embeddings=generate_embedding(schema_info)
+        )
+    return schema
+
+
+# Store schema information and prompts in ChromaDB
+vector_database_info = get_all_collection_schemas_and_store_prompts()
+print("Schemas and prompts have been successfully stored in ChromaDB")
+
+
+def similar_table(query, chroma_collection, model):
+    query_embedding = model.encode(query)
+
+    # Perform vector search
+    results = chroma_collection.query(query_embeddings=[query_embedding], n_results=1)
+
+    if results and results["metadatas"]:
+        metadata = results["metadatas"][0]
+        return metadata.get("collection_name"), metadata.get("schema_info")
+    return None, None
+
+def execute_generated_query(generated_query, db):
+    try:
+        print("Generated Query:", generated_query)  # Debugging
+
+        # Parse collection name and query type
+        collection_name = generated_query.split('["')[1].split('"]')[0]
+        query_type = generated_query.split('.')[1].split('(')[0]
+        query_params = generated_query.split('(', 1)[1].rsplit(')', 1)[0]
+        collection = db[collection_name]
+
+        # Handle query execution by type
+        if query_type == "find":
+            if ',' in query_params:  # Check for projection
+                query, projection = query_params.split(",", 1)
+                query = json.loads(query.strip())
+                projection = json.loads(projection.strip())
+                result = list(collection.find(query, projection))
+            else:  # No projection
+                query = json.loads(query_params.strip())
+                result = list(collection.find(query))
+
+        elif query_type == "count_documents":
+            query = json.loads(query_params.strip().replace("'", '"'))
+            result = collection.count_documents(query)
+
+        elif query_type == "aggregate":
+            pipeline = json_util.loads(query_params.strip().replace("'", '"'))
+            result = list(collection.aggregate(pipeline))
+
+        elif query_type == "distinct":
+            query_field = query_params.strip().replace("'", '"')
+            result = list(collection.distinct(query_field))
+
+        else:
+            raise ValueError(f"Unsupported query type: {query_type}")
+
+        print("Query Result:", result)
+        return result
+
+    except json.JSONDecodeError as e:
+        print(f"JSON Decode Error: {e}")
+        return {"error": f"JSON Decode Error: {str(e)}"}
+    except Exception as e:
+        print(f"Error during query execution: {e}")
+        return {"error": str(e)}
+
+
+# Function to generate MongoDB query from user question
+def generate_query(question):
+    prompt = f"""
+        You are a MongoDB expert. Your task is to generate accurate MongoDB queries based on the schema provided below.
+        Add double quotes to all the field names while generating the MongoDB query.
+        Use the schema and sample questions provided to guide the generation.
+        
+
+        <SCHEMA>
+        - Collection: articles
+          Fields: ["_id", "title", "body", "area", "firm"]
+
+        - Collection: careers
+          Fields: ["_id", "position", "location", "experience", "employment type", "compensation", "pay type", "firm"]
+
+        - Collection: practices
+          Fields: ["_id", "title", "specializations", "leaders", "team members", "firm"]
+
+        - Collection: teams
+          Fields: ["_id", "name", "position", "phone", "email", "education", "achievements", "admissions", "affiliations", "firm"]
+
+        Sample Questions and MongoDB Queries:
+        Question: List all articles in the area 'General'.
+        MongoDB Query: db["articles"].find({{"area": "General"}})
+
+        Question: Show all articles authored by 'Phillips Lytle'.
+        MongoDB Query: db["articles"].find({{"firm": "Phillips Lytle"}})
+
+        Question: Show all articles authored by 'Phillips Lytle' with the title containing 'Super Lawyers'.
+        MongoDB Query: db["articles"].find({{"firm": "Phillips Lytle", "title": {{"$regex": "Super Lawyers", "$options": "i"}}}})
+
+        Question: List all positions available in Albany, NY.
+        MongoDB Query: db["careers"].find({{"location": "Albany, NY"}})
+
+        Question: Show all positions with compensation above 150,000.
+        MongoDB Query: db["careers"].find({{"compensation": {{"$gt": 150000}}}})
+
+        Question: Who are the leaders in 'Environmental Law'?
+        MongoDB Query: db["practices"].find({{"title": "Environmental Law"}}, {{"leaders": 1, "_id": 0}})
+
+        Question: Who are the leaders in 'Bankruptcy and Creditors Rights Law'?
+        MongoDB Query: db["practices"].find({{"title": "Bankruptcy and Creditors Rights Law"}}, {{"leaders": 1, "_id": 0}})
+        
+        Question: Show all articles authored by 'Phillips Lytle' with titles containing 'Super Lawyers'.
+        MongoDB Query: db["articles"].find({{"firm": "Phillips Lytle", "title": {{"$regex": "Super Lawyers", "$options": "i"}}}})
+        
+        Question: Show all articles and their associated team members.
+        MongoDB Query: db["articles"].aggregate([
+            {{"$lookup": {{"from": "teams", "localField": "firm", "foreignField": "firm", "as": "team_members"}}}},
+            {{"$project": {{"title": 1, "team_members.name": 1, "_id": 0}}}}
+        ])
+        
+        Question: List all team members affiliated with 'Phillips Lytle'.
+        MongoDB Query: db["teams"].find({{"firm": "Phillips Lytle"}})
+        
+        Question: Who are the team members for title Antitrust?
+        MongoDB Query: db["practices"].find({{"title": "Antitrust"}}, {{"team members": 1, "_id": 0}})
+
+        Question: Show contact information for team members in 'Phillips Lytle'.
+        MongoDB Query: db["teams"].find({{"firm": "Phillips Lytle"}}, {{"name": 1, "phone": 1, "email": 1, "_id": 0}})
+
+        Question: {question}
+        MongoDB Query:
+    """
+    generation_config = {
+        "max_output_tokens": 8192,
+        "temperature": 0.3,
+        "top_p": 0.5,
+    }
+
+    safety_settings = {
+        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    }
+
+    response = generative_multimodal_model.generate_content([prompt],
+                                                            generation_config=generation_config)
+
+    return response.text.strip()
+
+
+# Example usage
+question = "What articles has Phillips Lytle published in the Technology sector?"
+generated_query = generate_query(question)
+print("Generated MongoDB Query:")
+print(generated_query)
+
+result = execute_generated_query(generated_query, database)
+print("Query Result:")
+print(result)
