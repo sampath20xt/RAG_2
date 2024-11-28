@@ -1,0 +1,191 @@
+import streamlit as st
+from pymongo import MongoClient
+from vertexai.generative_models import GenerativeModel
+import json
+from bson import json_util
+
+# Streamlit page setup
+st.set_page_config(page_title="Professional Chatbot", layout="wide")
+
+# MongoDB connection setup
+mongo_url = "mongodb+srv://admin:Sampath@cluster01.wcpmehz.mongodb.net/"
+mongo_client = MongoClient(mongo_url)
+database = mongo_client["RAG"]
+
+# Vertex AI generative model setup
+vertexai.init(project="email-extraction-381718", location="us-central1")
+generative_multimodal_model = GenerativeModel("gemini-1.5-pro-001")
+
+# Custom CSS for a professional chatbot interface
+st.markdown("""
+    <style>
+        body {
+            background-color: #f4f4f4;
+        }
+        .main {
+            background: #ffffff;
+            border-radius: 8px;
+            padding: 20px;
+            max-width: 800px;
+            margin: auto;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        .user-bubble {
+            background-color: #0084ff;
+            color: white;
+            padding: 10px;
+            border-radius: 15px;
+            margin: 10px 0;
+            max-width: 60%;
+            align-self: flex-end;
+        }
+        .bot-bubble {
+            background-color: #f1f0f0;
+            padding: 10px;
+            border-radius: 15px;
+            margin: 10px 0;
+            max-width: 60%;
+            align-self: flex-start;
+        }
+        .chat-container {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            max-height: 500px;
+            overflow-y: auto;
+            padding: 20px;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            background-color: #ffffff;
+        }
+        .chat-input {
+            margin-top: 20px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .chat-input textarea {
+            width: 85%;
+            height: 50px;
+            border-radius: 8px;
+            border: 1px solid #ccc;
+            padding: 10px;
+        }
+        .chat-input button {
+            width: 12%;
+            background-color: #0084ff;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+        .chat-input button:hover {
+            background-color: #005bb5;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+# Session state to store conversation history
+if "conversation" not in st.session_state:
+    st.session_state.conversation = []
+
+# Function to generate MongoDB query from user question
+def generate_query(question):
+    prompt = f"""
+        You are a MongoDB expert. Your task is to generate accurate MongoDB queries based on the schema provided below.
+        Add double quotes to all the field names while generating the MongoDB query.
+        Use the schema and sample questions provided to guide the generation.
+
+        <SCHEMA>
+        - Collection: articles
+          Fields: ["_id", "title", "body", "area", "firm"]
+
+        - Collection: careers
+          Fields: ["_id", "position", "location", "experience", "employment type", "compensation", "pay type", "firm"]
+
+        - Collection: practices
+          Fields: ["_id", "title", "specializations", "leaders", "team members", "firm"]
+
+        - Collection: teams
+          Fields: ["_id", "name", "position", "phone", "email", "education", "achievements", "admissions", "affiliations", "firm"]
+
+        Question: {question}
+        MongoDB Query:
+    """
+    generation_config = {
+        "max_output_tokens": 8192,
+        "temperature": 0.3,
+        "top_p": 0.5,
+    }
+
+    response = generative_multimodal_model.generate_content([prompt],
+                                                            generation_config=generation_config)
+
+    return response.text.strip()
+
+# Function to execute the generated MongoDB query
+def execute_generated_query(generated_query, db):
+    try:
+        collection_name = generated_query.split('["')[1].split('"]')[0]
+        query_type = generated_query.split('.')[1].split('(')[0]
+        query_params = generated_query.split('(', 1)[1].rsplit(')', 1)[0]
+        collection = db[collection_name]
+
+        if query_type == "find":
+            if ',' in query_params:
+                query, projection = query_params.split(",", 1)
+                query = json.loads(query.strip())
+                projection = json.loads(projection.strip())
+                result = list(collection.find(query, projection))
+            else:
+                query = json.loads(query_params.strip())
+                result = list(collection.find(query))
+        elif query_type == "aggregate":
+            pipeline = json_util.loads(query_params.strip())
+            result = list(collection.aggregate(pipeline))
+        else:
+            raise ValueError(f"Unsupported query type: {query_type}")
+
+        return result
+
+    except Exception as e:
+        return {"error": str(e)}
+
+# Chat interface
+st.markdown('<div class="main">', unsafe_allow_html=True)
+st.title("Professional Chatbot")
+
+# Chat history
+st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+for message in st.session_state.conversation:
+    if message["sender"] == "user":
+        st.markdown(f'<div class="user-bubble">{message["message"]}</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div class="bot-bubble">{message["message"]}</div>', unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
+
+# Chat input
+st.markdown('<div class="chat-input">', unsafe_allow_html=True)
+user_input = st.text_area("Type your message here...")
+if st.button("Send"):
+    if user_input.strip():
+        # Add user message to conversation
+        st.session_state.conversation.append({"sender": "user", "message": user_input})
+
+        # Generate MongoDB query
+        try:
+            query = generate_query(user_input)
+            # Add query to conversation
+            st.session_state.conversation.append({"sender": "bot", "message": f"Generated Query:\n{query}"})
+
+            # Execute query
+            result = execute_generated_query(query, database)
+            if "error" in result:
+                bot_response = f"Error: {result['error']}"
+            else:
+                bot_response = f"Result:\n{result}"
+            # Add bot response to conversation
+            st.session_state.conversation.append({"sender": "bot", "message": bot_response})
+        except Exception as e:
+            error_message = f"An error occurred: {str(e)}"
+            st.session_state.conversation.append({"sender": "bot", "message": error_message})
+st.markdown('</div>', unsafe_allow_html=True)
