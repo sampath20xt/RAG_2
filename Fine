@@ -1,0 +1,152 @@
+import streamlit as st
+from streamlit_chat import message  # Library for chat UI
+from pymongo import MongoClient
+from sentence_transformers import SentenceTransformer
+import json
+from bson import json_util
+
+# MongoDB Configuration
+mongo_url = "mongodb+srv://admin:Sampath@cluster01.wcpmehz.mongodb.net/"
+mongo_client = MongoClient(mongo_url)
+database = mongo_client["RAG"]
+
+# Collections
+collections = ["articles", "careers", "practices", "teams"]
+
+# Sentence Transformer Model
+embedding_model = SentenceTransformer('multi-qa-distilbert-cos-v1')
+
+# Helper Functions from Your Code
+def get_schema(db):
+    """Retrieve schema from MongoDB collections."""
+    schema_info = {}
+    collections = db.list_collection_names()
+    for collection_name in collections:
+        collection = db[collection_name]
+        sample_record = collection.find_one()
+        if sample_record:
+            schema_info[collection_name] = {key: type(value).__name__ for key, value in sample_record.items()}
+        else:
+            schema_info[collection_name] = "No records found"
+    return schema_info
+
+def execute_generated_query(generated_query, db):
+    """Execute MongoDB queries dynamically."""
+    try:
+        # Parse collection name and query type
+        collection_name = generated_query.split('["')[1].split('"]')[0]
+        query_type = generated_query.split('.')[1].split('(')[0]
+        query_params = generated_query.split('(', 1)[1].rsplit(')', 1)[0]
+        collection = db[collection_name]
+
+        # Handle query execution by type
+        if query_type == "find":
+            if ',' in query_params:  # Check for projection
+                query, projection = query_params.split(",", 1)
+                query = json.loads(query.strip())
+                projection = json.loads(projection.strip())
+                result = list(collection.find(query, projection))
+            else:  # No projection
+                query = json.loads(query_params.strip())
+                result = list(collection.find(query))
+
+        elif query_type == "count_documents":
+            query = json.loads(query_params.strip().replace("'", '"'))
+            result = collection.count_documents(query)
+
+        elif query_type == "aggregate":
+            pipeline = json_util.loads(query_params.strip().replace("'", '"'))
+            result = list(collection.aggregate(pipeline))
+
+        elif query_type == "distinct":
+            query_field = query_params.strip().replace("'", '"')
+            result = list(collection.distinct(query_field))
+
+        else:
+            raise ValueError(f"Unsupported query type: {query_type}")
+
+        return result
+
+    except Exception as e:
+        return {"error": str(e)}
+
+def generate_query(question):
+    """Generate a MongoDB query based on user input."""
+    prompt = f"""
+        You are a MongoDB expert. Your task is to generate accurate MongoDB queries based on the schema provided below.
+        Add double quotes to all the field names while generating the MongoDB query.
+        
+        <SCHEMA>
+        - Collection: articles
+          Fields: ["_id", "title", "body", "area", "firm"]
+
+        - Collection: careers
+          Fields: ["_id", "position", "location", "experience", "employment type", "compensation", "pay type", "firm"]
+
+        - Collection: practices
+          Fields: ["_id", "title", "specializations", "leaders", "team members", "firm"]
+
+        - Collection: teams
+          Fields: ["_id", "name", "position", "phone", "email", "education", "achievements", "admissions", "affiliations", "firm"]
+
+        Sample Questions and MongoDB Queries:
+        Question: List all articles in the area 'General'.
+        MongoDB Query: db["articles"].find({{"area": "General"}})
+
+        Question: {question}
+        MongoDB Query:
+    """
+    # Simulate query generation (this is where your model can help)
+    # For now, return a basic hardcoded query for simplicity
+    return f'db["articles"].find({{"area": "Technology"}})'
+
+
+# Streamlit Application
+st.set_page_config(page_title="RAG Chat", page_icon="💬", layout="centered")
+st.markdown("<h1 style='text-align: center; color: #1F4E79;'>Welcome to RAG Chat</h1>", unsafe_allow_html=True)
+
+# Chat History
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# User Input
+user_input = st.text_input(
+    "Enter your question below 👇:",
+    key="user_input",
+    placeholder="e.g., What articles has Phillips Lytle published in the Technology sector?",
+)
+
+if user_input:
+    # Append user question to chat history
+    st.session_state.messages.append({"role": "user", "content": user_input})
+
+    # Generate MongoDB query from user input
+    generated_query = generate_query(user_input)
+
+    # Execute the generated query
+    query_result = execute_generated_query(generated_query, database)
+
+    # Prepare bot response
+    if isinstance(query_result, list):
+        bot_message = f"Query executed successfully. Result: {query_result[:5]} (showing first 5 results)"
+    else:
+        bot_message = f"Error: {query_result.get('error')}"
+
+    # Append bot response to chat history
+    st.session_state.messages.append({"role": "bot", "content": bot_message})
+
+    # Clear user input
+    st.session_state.user_input = ""
+
+# Display Chat Messages
+for message_data in st.session_state.messages:
+    if message_data["role"] == "user":
+        message(message_data["content"], is_user=True, key=f"user_{message_data['content']}")
+    else:
+        message(message_data["content"], key=f"bot_{message_data['content']}")
+
+# Footer
+st.markdown(
+    "<footer style='text-align: center;'>Developed with ❤️ using Streamlit</footer>",
+    unsafe_allow_html=True,
+)
