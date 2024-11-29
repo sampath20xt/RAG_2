@@ -1,0 +1,122 @@
+import streamlit as st
+from pymongo import MongoClient
+from bson import json_util
+from sentence_transformers import SentenceTransformer
+import chromadb
+import vertexai
+from vertexai.preview.generative_models import GenerativeModel
+
+# Initialize Vertex AI generative model
+vertexai.init(project="email-extraction-381718", location="us-central1")
+generative_multimodal_model = GenerativeModel("gemini-1.5-pro-001")
+
+# Initialize MongoDB client
+mongo_url = "mongodb+srv://admin:Sampath@cluster01.wcpmehz.mongodb.net/"
+mongo_client = MongoClient(mongo_url)
+database = mongo_client["RAG"]
+
+# Initialize ChromaDB client and collection
+chroma_client = chromadb.Client()
+chroma_collection = chroma_client.create_collection(name="RAG_collection")
+
+# Function to retrieve MongoDB schema
+def get_schema(db):
+    schema_info = {}
+    collections = db.list_collection_names()
+    for collection_name in collections:
+        collection = db[collection_name]
+        sample_record = collection.find_one()
+        if sample_record:
+            schema_info[collection_name] = {key: type(value).__name__ for key, value in sample_record.items()}
+        else:
+            schema_info[collection_name] = "No records found"
+    return schema_info
+
+# Function to generate embeddings for ChromaDB
+def generate_embedding(query):
+    model = SentenceTransformer('multi-qa-distilbert-cos-v1')
+    return model.encode(query)
+
+# Function to execute MongoDB queries
+def execute_generated_query(generated_query, db):
+    try:
+        collection_name = generated_query.split('["')[1].split('"]')[0]
+        query_type = generated_query.split('.')[1].split('(')[0]
+        query_params = generated_query.split('(', 1)[1].rsplit(')', 1)[0]
+        collection = db[collection_name]
+
+        if query_type == "find":
+            if ',' in query_params:
+                query, projection = query_params.split(",", 1)
+                query = json.loads(query.strip())
+                projection = json.loads(projection.strip())
+                result = list(collection.find(query, projection))
+            else:
+                query = json.loads(query_params.strip())
+                result = list(collection.find(query))
+        elif query_type == "count_documents":
+            query = json.loads(query_params.strip().replace("'", '"'))
+            result = collection.count_documents(query)
+        elif query_type == "aggregate":
+            pipeline = json_util.loads(query_params.strip().replace("'", '"'))
+            result = list(collection.aggregate(pipeline))
+        elif query_type == "distinct":
+            query_field = query_params.strip().replace("'", '"')
+            result = list(collection.distinct(query_field))
+        else:
+            raise ValueError(f"Unsupported query type: {query_type}")
+
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+# Function to generate MongoDB query
+def generate_query(question):
+    prompt = f"""
+        You are a MongoDB expert. Your task is to generate accurate MongoDB queries based on the schema provided below.
+        Add double quotes to all the field names while generating the MongoDB query.
+
+        <SCHEMA>
+        - Collection: articles
+          Fields: ["_id", "title", "body", "area", "firm"]
+
+        - Collection: careers
+          Fields: ["_id", "position", "location", "experience", "employment type", "compensation", "pay type", "firm"]
+
+        - Collection: practices
+          Fields: ["_id", "title", "specializations", "leaders", "team members", "firm"]
+
+        - Collection: teams
+          Fields: ["_id", "name", "position", "phone", "email", "education", "achievements", "admissions", "affiliations", "firm"]
+
+        Question: {question}
+        MongoDB Query:
+    """
+    response = generative_multimodal_model.generate_content([prompt], generation_config={"max_output_tokens": 1000})
+    return response.text.strip()
+
+# Streamlit App
+st.title("RAG-Powered MongoDB Chatbot")
+st.write("Ask questions about your MongoDB collections and get instant answers!")
+
+# Conversation UI
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+question = st.text_input("Ask the bot:")
+if question:
+    # Generate MongoDB query
+    st.session_state.history.append({"user": question})
+    generated_query = generate_query(question)
+    st.session_state.history.append({"bot": f"Generated MongoDB Query: {generated_query}"})
+
+    # Execute the generated query
+    query_result = execute_generated_query(generated_query, database)
+    st.session_state.history.append({"bot": f"Query Result: {query_result}"})
+
+# Display conversation
+for message in st.session_state.history:
+    if "user" in message:
+        st.write(f"**You**: {message['user']}")
+    elif "bot" in message:
+        st.write(f"**Bot**: {message['bot']}")
