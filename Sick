@@ -1,0 +1,77 @@
+def main():
+    # Page configuration
+    st.set_page_config(page_title="RAG MongoDB App", page_icon=":books:")
+
+    # Custom CSS for title styling
+    st.markdown(
+        """
+        <style>
+        .title-box {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            border: 2px solid #FF4B4B;
+            border-radius: 10px;
+            background-color: #F9F9F9;
+            padding: 10px;
+            margin: 10px 0;
+        }
+        .title-box h1 {
+            color: #FF4B4B;
+            margin: 0;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # Title with centered styling in a frame box
+    st.markdown('<div class="title-box"><h1>RAG CHATBOT</h1></div>', unsafe_allow_html=True)
+
+    # Sidebar for schema display
+    schema = get_all_collection_schemas_and_store_prompts()
+    st.sidebar.header("Database Schema")
+    for collection, fields in schema.items():
+        st.sidebar.write(f"**{collection}**: {', '.join(fields.keys())}")
+
+    # Initialize chat history in session state
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+    # Display chat history
+    for message in st.session_state.chat_history:
+        if message["role"] == "user":
+            with st.chat_message("user"):
+                st.write(message["content"])
+        elif message["role"] == "system":
+            with st.chat_message("system"):
+                st.write(message["content"])
+
+    # User input
+    user_query = st.chat_input("Ask a question about the database...")
+    if user_query:
+        # Append user query to chat history
+        st.session_state.chat_history.append({"role": "user", "content": user_query})
+        with st.chat_message("user"):
+            st.write(user_query)
+
+        # Generate query and execute it
+        generated_query = generate_query(user_query)
+        st.write(f"**Generated Query:** {generated_query}")
+        result = execute_generated_query(generated_query, database)
+
+        # Display query result
+        if isinstance(result, list):
+            response_content = f"**Query Results:**\n{result}"
+        else:
+            response_content = f"Error: {result.get('error')}"
+
+        with st.chat_message("system"):
+            st.write(response_content)
+
+        # Append response to chat history
+        st.session_state.chat_history.append({"role": "system", "content": response_content})
+
+
+if __name__ == "__main__":
+    main()
