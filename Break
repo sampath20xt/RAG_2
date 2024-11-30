@@ -1,0 +1,138 @@
+import streamlit as st
+from pymongo import MongoClient
+from bson import json_util
+from sentence_transformers import SentenceTransformer
+import chromadb
+import vertexai
+from vertexai.preview.generative_models import GenerativeModel
+
+# MongoDB setup
+mongo_url = "mongodb+srv://admin:Sampath@cluster01.wcpmehz.mongodb.net/"
+mongo_client = MongoClient(mongo_url)
+database = mongo_client["RAG"]
+
+# Collections
+collections = ["articles", "careers", "practices", "teams"]
+
+# Vertex AI setup
+vertexai.init(project="email-extraction-381718", location="us-central1")
+generative_multimodal_model = GenerativeModel("gemini-1.5-pro-001")
+
+# ChromaDB setup
+chroma_client = chromadb.Client()
+chroma_collection = chroma_client.create_collection(name="RAG_collection")
+
+
+# Function to retrieve MongoDB schema
+def get_schema(db):
+    schema_info = {}
+    collections = db.list_collection_names()
+    for collection_name in collections:
+        collection = db[collection_name]
+        sample_record = collection.find_one()
+        if sample_record:
+            schema_info[collection_name] = {key: type(value).__name__ for key, value in sample_record.items()}
+        else:
+            schema_info[collection_name] = "No records found"
+    return schema_info
+
+
+# Function to generate embeddings for ChromaDB
+def generate_embedding(query):
+    model = SentenceTransformer('multi-qa-distilbert-cos-v1')
+    return model.encode(query)
+
+
+# Store schemas and prompts in ChromaDB
+def get_all_collection_schemas_and_store_prompts():
+    schema = get_schema(database)
+    for collection_name, fields in schema.items():
+        field_names = ' '.join(fields.keys())
+        schema_info = f"{collection_name}:{field_names}"
+
+        # Create a prompt for storing schema info in ChromaDB
+        prompt = f"<SCHEMA>{schema_info}</SCHEMA>"
+        chroma_collection.upsert(
+            ids=[collection_name],
+            metadatas=[{"collection_name": collection_name, "schema_info": schema_info, "prompt": prompt}],
+            embeddings=generate_embedding(schema_info)
+        )
+    return schema
+
+
+# Query execution
+def execute_generated_query(generated_query, db):
+    try:
+        collection_name = generated_query.split('["')[1].split('"]')[0]
+        query_type = generated_query.split('.')[1].split('(')[0]
+        query_params = generated_query.split('(', 1)[1].rsplit(')', 1)[0]
+        collection = db[collection_name]
+
+        if query_type == "find":
+            query = json.loads(query_params.strip())
+            result = list(collection.find(query))
+        elif query_type == "count_documents":
+            query = json.loads(query_params.strip().replace("'", '"'))
+            result = collection.count_documents(query)
+        elif query_type == "aggregate":
+            pipeline = json_util.loads(query_params.strip().replace("'", '"'))
+            result = list(collection.aggregate(pipeline))
+        elif query_type == "distinct":
+            query_field = query_params.strip().replace("'", '"')
+            result = list(collection.distinct(query_field))
+        else:
+            raise ValueError(f"Unsupported query type: {query_type}")
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# Generate MongoDB query
+def generate_query(question):
+    prompt = f"""
+        You are a MongoDB expert. Your task is to generate accurate MongoDB queries based on the schema provided below.
+        Question: {question}
+        MongoDB Query:
+    """
+    response = generative_multimodal_model.generate_content([prompt], generation_config={"max_output_tokens": 500})
+    return response.text.strip()
+
+
+# Main function for Streamlit app
+def main():
+    st.set_page_config(page_title="RAG MongoDB App", page_icon=":books:")
+    st.title("RAG MongoDB Query Generator")
+
+    # Display schema
+    schema = get_all_collection_schemas_and_store_prompts()
+    st.sidebar.header("Database Schema")
+    for collection, fields in schema.items():
+        st.sidebar.write(f"**{collection}**: {', '.join(fields.keys())}")
+
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+    # Chat interface
+    user_query = st.chat_input("Ask a question about the database...")
+    if user_query:
+        st.session_state.chat_history.append({"role": "user", "content": user_query})
+        with st.chat_message("user"):
+            st.write(user_query)
+
+        # Generate and execute query
+        generated_query = generate_query(user_query)
+        st.write(f"**Generated Query:** {generated_query}")
+        result = execute_generated_query(generated_query, database)
+
+        # Display result
+        if isinstance(result, list):
+            st.write("**Query Results:**")
+            st.json(result)
+        else:
+            st.error(f"Error: {result.get('error')}")
+
+        # Append response to chat history
+        st.session_state.chat_history.append({"role": "system", "content": str(result)})
+
+if __name__ == "__main__":
+    main()
